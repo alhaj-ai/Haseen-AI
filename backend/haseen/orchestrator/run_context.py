@@ -1,0 +1,170 @@
+"""Context object passed through phases of a run."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+# Scoped constraints — limit blast radius, not global read-only.
+_SCOPE_ONLY_CONSTRAINTS = (
+    "do not modify any other files",
+    "don't modify any other files",
+    "do not change any other files",
+    "don't change any other files",
+    "do not edit any other files",
+    "don't edit any other files",
+    "keep the change minimal",
+    "only modify readme.md",
+    "only modify readme",
+    "do not change code files",
+    "don't change code files",
+)
+
+# Explicit read-only signals that win even when mutation verbs appear elsewhere.
+_READ_ONLY_OVERRIDES = (
+    "without applying",
+    "do not apply",
+    "don't apply",
+    "do not edit",
+    "don't edit",
+    "do not modify files",
+    "don't modify files",
+    "do not make code changes",
+    "don't make code changes",
+    "no code changes",
+    "report only",
+    "read-only",
+    "read only",
+)
+
+_MUTATION_PHRASES = (
+    "write to",
+    "save the file",
+    "add exactly this sentence",
+    "modify readme",
+    "update readme",
+)
+
+_MUTATION_RE = re.compile(
+    r"\b("
+    r"modify|update|add|insert|remove|delete|change|edit|replace|create|"
+    r"implement|fix|refactor|rename|move|patch|write"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_READ_ONLY_INTENT_RE = re.compile(
+    r"\b("
+    r"inspect|analyze|analyse|summarize|summarise|explain|describe|"
+    r"overview|audit|review|list|architecture summary"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _scrub_scope_constraints(text: str) -> str:
+    result = text
+    for phrase in _SCOPE_ONLY_CONSTRAINTS:
+        result = result.replace(phrase, " ")
+    return result
+
+
+def _has_mutation_intent(task_lower: str) -> bool:
+    scrubbed = _scrub_scope_constraints(task_lower)
+    for phrase in _MUTATION_PHRASES:
+        if phrase in scrubbed:
+            return True
+    return bool(_MUTATION_RE.search(scrubbed))
+
+
+# "Do not modify any files", "don't change anything", "without editing the repo": a refusal that covers the whole
+# repository. A negation with a narrower object ("don't change the tests", "any other files") is a scope limit
+# and is not read-only.
+_GLOBAL_NEGATION = re.compile(
+    r"\b(?:do\s+not|don't|dont|never|must\s+not|should\s+not|shouldn't|without|please\s+don't)\s+(?:actually\s+)?"
+    r"(?:modify|modifying|change|changing|edit|editing|alter|altering|touch|touching|write\s+to|writing\s+to|update|updating|apply|applying)\s+"
+    r"(?:any|the|my|our|your|these|those|all)?\s*(?:of\s+)?(?:files?|anything|code|repo(?:sitory)?|source(?:\s+code)?|codebase|project)\b(?!\s+other)",
+    re.IGNORECASE)
+
+
+def _has_read_only_override(task_lower: str) -> bool:
+    return any(phrase in task_lower for phrase in _READ_ONLY_OVERRIDES) or bool(_GLOBAL_NEGATION.search(_scrub_scope_constraints(task_lower)))
+
+
+def _has_read_only_intent(task_lower: str) -> bool:
+    scrubbed = _scrub_scope_constraints(task_lower)
+    return bool(_READ_ONLY_INTENT_RE.search(scrubbed))
+
+
+def _detect_read_only(task: str, dry_run: bool) -> bool:
+    """Return True when the task primary intent is inspect/analyze without edits."""
+    if dry_run:
+        return True
+
+    task_lower = task.lower()
+
+    if _has_read_only_override(task_lower):
+        return True
+
+    if _has_mutation_intent(task_lower):
+        return False
+
+    if _has_read_only_intent(task_lower):
+        return True
+
+    return False
+
+
+def extract_quoted_sentence(task: str) -> str | None:
+    """Extract a quoted sentence from a task, if present."""
+    for pattern in (r'"([^"]{10,})"', r"'([^']{10,})'"):
+        match = re.search(pattern, task)
+        if match:
+            return match.group(1)
+    return None
+
+
+@dataclass
+class RunContext:
+    run_id: str
+    repo_path: str
+    task: str
+    provider: str = "mock"
+    model: str | None = None
+    runtime_mode: str = "local"
+    base_url: str | None = None
+    dry_run: bool = False
+    read_only: bool = False
+    analysis: str | None = None
+    plan: dict[str, Any] | None = None
+    selected_files: list[str] = field(default_factory=list)
+    selected_context: dict[str, str] = field(default_factory=dict)
+    proposed_diff: str | None = None
+    applied_files: list[str] = field(default_factory=list)
+    test_commands: list[str] = field(default_factory=list)
+    test_results: list[dict[str, Any]] = field(default_factory=list)
+    commands_run: list[dict[str, Any]] = field(default_factory=list)
+    security_findings: list[dict[str, Any]] = field(default_factory=list)
+    secret_findings: list[Any] = field(default_factory=list)
+    approvals: list[dict[str, Any]] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    memory_updates: list[dict[str, Any]] = field(default_factory=list)
+    memory_notes: list[dict[str, Any]] = field(default_factory=list)  # advisory facts chosen for this run (see runtime.run_memory)
+    # --- validated-patch pipeline ---
+    context_provenance: list[dict[str, Any]] = field(default_factory=list)
+    patch_summary: list[dict[str, Any]] = field(default_factory=list)  # per-file action/added/removed
+    repair_rounds: int = 0
+    baseline_results: list[dict[str, Any]] = field(default_factory=list)
+    verdict: str | None = None  # passed | failed | no_tests | pre_existing_failure
+    outcome: str | None = None  # applied | rejected | conflict | no_changes | read_only | blocked
+    review: dict[str, Any] | None = None
+    workspace_path: str | None = None
+    model_calls: int = 0
+    tokens_used: int = 0
+    retries: int = 0
+    wall_seconds: float = 0.0  # active time, accumulated across attempts
+    patch_attempts: int = 0
+    # Set by the state machine so roles can publish timeline events without importing it.
+    event_sink: Callable[[str, dict[str, Any]], Awaitable[None]] | None = field(default=None, repr=False, compare=False)

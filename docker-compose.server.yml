@@ -1,0 +1,53 @@
+# Team / server mode: PostgreSQL + API + workers. Several API and worker containers (on one or many hosts that can
+# reach the database) share one database; runs survive a worker crash and are picked up by another worker.
+#
+#   export POSTGRES_PASSWORD=$(openssl rand -hex 16)
+#   docker compose -f docker-compose.server.yml run --rm api haseen admin init --org Acme --workspace main --owner you
+#   docker compose -f docker-compose.server.yml up -d --scale worker=3
+#
+# What this does NOT give you: TLS (put a reverse proxy in front), backups (see docs/deployment.md), object storage
+# for artifacts, SSO. Nothing here is tuned for or validated at large scale beyond docs/benchmarks.md.
+x-env: &env
+  HASEEN_QUEUE_MODE: "true"
+  HASEEN_DATABASE_URL: postgresql://haseen:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/haseen
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: haseen
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: haseen
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U haseen -d haseen"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build: .
+    image: haseen
+    ports: ["127.0.0.1:8000:8000"]
+    environment: *env
+    volumes:
+      - ${HASEEN_REPOS:-./repos}:/repos
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: unless-stopped
+
+  worker:
+    image: haseen
+    command: ["haseen", "worker", "--grace", "60"]
+    environment: *env
+    volumes:
+      - ${HASEEN_REPOS:-./repos}:/repos
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: unless-stopped
+    stop_grace_period: 90s
+
+volumes:
+  pg-data:
