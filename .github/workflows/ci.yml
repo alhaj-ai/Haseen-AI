@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  verify-runtime:
+    name: Crash Recovery & Runtime Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Runtime Dependencies
+        run: pip install httpx pydantic pyyaml fastapi
+      - name: Compile Python Runtime Package
+        run: python -m compileall -q backend/haseen
+      - name: Execute Deterministic Crash & Resume Verification
+        env:
+          PYTHONPATH: backend
+        run: python -m haseen.cli demo crash
